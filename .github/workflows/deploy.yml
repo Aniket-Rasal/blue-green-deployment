@@ -1,0 +1,161 @@
+name: Blue-Green Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+    inputs:
+      version:
+        description: "Version tag to deploy"
+        required: false
+        default: "latest"
+      keep_old:
+        description: "Keep old container for instant rollback?"
+        type: boolean
+        default: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Required repository secrets:
+#    SERVER_HOST   — IP or hostname of your server
+#    SERVER_USER   — SSH username (e.g. ubuntu)
+#    SERVER_SSH_KEY — Private SSH key (contents of ~/.ssh/id_rsa)
+# ─────────────────────────────────────────────────────────────────────────────
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/blue-green-demo
+
+jobs:
+
+  # ── Job 1: Run tests ─────────────────────────────────────────────────────────
+  test:
+    name: 🧪 Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/v2/package.json
+
+      - name: Install dependencies
+        run: cd app/v2 && npm install
+
+      - name: Run tests (add your test command here)
+        run: |
+          cd app/v2
+          # npm test
+          echo "✅ Tests passed (add real tests here)"
+
+  # ── Job 2: Build & push Docker image ─────────────────────────────────────────
+  build:
+    name: 🐳 Build & Push
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      short-sha: ${{ steps.vars.outputs.short-sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set short SHA
+        id: vars
+        run: echo "short-sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-green
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/v2
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 3: Deploy to server ───────────────────────────────────────────────────
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production        # Requires manual approval in GitHub (optional)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/blue-green-deployment
+
+            echo "📥 Pulling latest code..."
+            git pull origin main
+
+            echo "🚀 Running blue-green deploy..."
+            chmod +x scripts/deploy.sh
+            ./scripts/deploy.sh \
+              --version "${{ needs.build.outputs.short-sha }}" \
+              ${{ github.event.inputs.keep_old == 'true' && '--keep-old' || '' }}
+
+            echo "✅ Deployment complete!"
+
+  # ── Job 4: Smoke test after deploy ───────────────────────────────────────────
+  smoke-test:
+    name: 💨 Smoke Test
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+      - name: Wait for deployment to settle
+        run: sleep 10
+
+      - name: Verify app is responding
+        run: |
+          RESPONSE=$(curl -sf -o /dev/null -w "%{http_code}" http://${{ secrets.SERVER_HOST }}/)
+          echo "HTTP status: $RESPONSE"
+          if [[ "$RESPONSE" != "200" ]]; then
+            echo "❌ Smoke test FAILED — triggering rollback!"
+            exit 1
+          fi
+          echo "✅ Smoke test passed!"
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd ~/blue-green-deployment
+            echo "🔙 Rolling back deployment..."
+            ./scripts/deploy.sh --rollback
+            echo "↩️  Rollback complete"

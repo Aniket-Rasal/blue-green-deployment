@@ -1,0 +1,5 @@
+node_modules/
+nginx/active.conf
+*.log
+.env
+.DS_Store

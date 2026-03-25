@@ -1,0 +1,38 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: 'blue-green-demo'
+
+scrape_configs:
+
+  # ── Prometheus itself ────────────────────────────────────────────────────────
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ── cAdvisor (container CPU, memory, network) ────────────────────────────────
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metrics_path: /metrics
+
+  # ── Nginx exporter ───────────────────────────────────────────────────────────
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+
+  # ── App health endpoints (custom scrape via HTTP) ────────────────────────────
+  #    Note: these are probe-style checks, not proper Prometheus exporters.
+  #    For production, add prom-client to your Node.js app.
+  - job_name: 'app-blue'
+    static_configs:
+      - targets: ['app-blue:3000']
+    metrics_path: /health
+    scheme: http
+
+  - job_name: 'app-green'
+    static_configs:
+      - targets: ['app-green:3000']
+    metrics_path: /health
+    scheme: http
