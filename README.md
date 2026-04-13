@@ -454,7 +454,3 @@ Once this is working locally, the natural next steps are:
 - **Take it to AWS** — the local setup maps directly to ECS + ALB + CodeDeploy; Blue/Green containers become ECS task definitions, Nginx becomes an Application Load Balancer
 
 ---
-
-## License
-
-MIT — use it, break it, learn from it.
